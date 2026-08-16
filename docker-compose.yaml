@@ -1,0 +1,208 @@
+# =============================================================================
+# HARDENING
+#   Every service drops ALL Linux capabilities and re-adds only the essential
+#   ones, enables no-new-privileges, and gets tmpfs for /tmp. Rootfs is
+#   read-only where the image only writes to mounted volumes + tmpfs.
+#
+#   Port exposure: postgres (5432), redis (6379) and evolution-api (8080) are
+#   INTERNAL ONLY (reachable via Docker DNS by service name). They are no
+#   longer published to 0.0.0.0. Only cc-brief-agent keeps a published port.
+#
+#   cc-brief-agent / evolution-api: NOT read-only — the agent image runs as
+#   root and spawns Chromium (needs writable cache/scratch outside /tmp), and
+#   evolution-api writes session data under its instance dir.
+# =============================================================================
+
+services:
+  cc-brief-agent:
+    # Pull pre-built image from Docker Hub instead of building from source.
+    # This is pushed automatically by .github/workflows/docker-publish-fresh.yml
+    # on every push to main. No local build needed on the host.
+    image: sourabhjagga/briefing-agent-fresh:${IMAGE_TAG:-latest}
+    # Always pull the latest image from Docker Hub on every deploy.
+    # This ensures Coolify never uses a stale cached layer and always
+    # runs the image built by the most recent GitHub Actions workflow run.
+    pull_policy: always
+    container_name: cc-brief-agent
+    restart: unless-stopped
+    cap_drop:
+      - ALL
+    cap_add:
+      - CHOWN
+      - DAC_OVERRIDE
+      - FOWNER
+      - SETUID
+      - SETGID
+      - NET_BIND_SERVICE
+      - SYS_PTRACE
+    security_opt:
+      - no-new-privileges:true
+    tmpfs:
+      - /tmp:rw,size=256m
+    depends_on:
+      evolution-api:
+        condition: service_healthy
+        restart: false
+      postgres:
+        condition: service_healthy
+        restart: false
+      redis:
+        condition: service_healthy
+        restart: false
+    volumes:
+      - cc_brief_data:/app/data
+      - cc_brief_logs:/app/logs
+    ports:
+      - "3456:3000"
+    environment:
+      - TELEGRAM_BOT_TOKEN=${TELEGRAM_BOT_TOKEN}
+      - TELEGRAM_CHAT_ID=${TELEGRAM_CHAT_ID}
+      - GEMINI_API_KEY=${GEMINI_API_KEY}
+      - OPENROUTER_API_KEY=${OPENROUTER_API_KEY}
+      - DEALS_BOT_TOKEN=${DEALS_BOT_TOKEN}
+      - SUMMARY_HOUR=${SUMMARY_HOUR:-6}
+      - SUMMARY_MINUTE=${SUMMARY_MINUTE:-0}
+      - WHATSAPP_GROUPS=${WHATSAPP_GROUPS}
+      - WHATSAPP_ADMIN_JID=${WHATSAPP_ADMIN_JID}
+      - TZ=${TZ:-Asia/Kolkata}
+      - LOG_LEVEL=${LOG_LEVEL:-info}
+      - MAX_MESSAGES_FOR_SUMMARY=${MAX_MESSAGES_FOR_SUMMARY:-2000}
+      - DB_PATH=/app/data/messages.db
+      - TECHNOFINO_USERNAME=${TECHNOFINO_USERNAME}
+      - TECHNOFINO_PASSWORD=${TECHNOFINO_PASSWORD}
+      - DESIDIME_USERNAME=${DESIDIME_USERNAME}
+      - DESIDIME_PASSWORD=${DESIDIME_PASSWORD}
+      - REDDIT_USERNAME=${REDDIT_USERNAME}
+      - REDDIT_PASSWORD=${REDDIT_PASSWORD}
+      - TELEGRAM_API_ID=${TELEGRAM_API_ID}
+      - TELEGRAM_API_HASH=${TELEGRAM_API_HASH}
+      # Evolution API Configuration
+      - USE_EVOLUTION_API=${USE_EVOLUTION_API:-true}
+      - EVOLUTION_API_URL=${EVOLUTION_API_URL:-http://evolution-api:8080}
+      - EVOLUTION_API_KEY=${EVOLUTION_API_KEY}
+      - EVOLUTION_INSTANCE_NAME=${EVOLUTION_INSTANCE_NAME:-cc-brief}
+      - EVOLUTION_WEBHOOK_URL=${EVOLUTION_WEBHOOK_URL}
+      - WEBHOOK_SECRET=${WEBHOOK_SECRET}
+      # API auth: same value baked into the dashboard bundle at build time
+      - DASHBOARD_API_KEY=${DASHBOARD_API_KEY}
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  evolution-api:
+    # Pinned to v2.3.7 (latest stable release, 2025-12-05). Do NOT use :latest —
+    # it tracks release candidates (2.4.0-rc) which are unstable for production.
+    image: evoapicloud/evolution-api:v2.3.7@sha256:1bd8afc4a6cf48822e6cf02469aeae7bd35a12a6b616eacd1291926307f4d339
+    container_name: evolution-api
+    restart: unless-stopped
+    cap_drop:
+      - ALL
+    cap_add:
+      - CHOWN
+      - DAC_OVERRIDE
+      - FOWNER
+      - SETUID
+      - SETGID
+      - NET_BIND_SERVICE
+    security_opt:
+      - no-new-privileges:true
+    tmpfs:
+      - /tmp:rw,size=128m
+    expose:
+      - "8080"
+    environment:
+      - SERVER_TYPE=http
+      - SERVER_URL=http://evolution-api:8080
+      - DATABASE_PROVIDER=postgresql
+      - DATABASE_CONNECTION_URI=${DATABASE_CONNECTION_URI}
+      - DATABASE_CONNECTION_CLIENT_NAME=evolution-api
+      - REDIS_URI=redis://redis:6379
+      - REDIS_DB=0
+      - AUTHENTICATION_API_KEY=${EVOLUTION_API_KEY}
+      - LOG_LEVEL=info
+      - CORS_ORIGIN=${CORS_ORIGIN:-}
+      - CONFIG_SESSION_PHONE_CLIENT=CC Brief Agent
+      - CONFIG_SESSION_PHONE_NAME=CC Brief Agent
+    depends_on:
+      postgres:
+        condition: service_healthy
+        restart: false
+      redis:
+        condition: service_healthy
+        restart: false
+    healthcheck:
+      test: ["CMD-SHELL", "node -e \"require('net').connect({port: 8080, host: 'localhost'}, () => process.exit(0)).on('error', () => process.exit(1))\""]
+      interval: 15s
+      timeout: 10s
+      retries: 10
+      start_period: 90s
+    volumes:
+      - evolution_data:/evolution/instances
+
+  postgres:
+    image: postgres:17-alpine@sha256:18cfe3ef5e6815560c98237d6216d1e5119702fb0f3894c8785dd58b8bbe5d73
+    container_name: evolution-postgres
+    restart: unless-stopped
+    read_only: true
+    cap_drop:
+      - ALL
+    cap_add:
+      - CHOWN
+      - DAC_OVERRIDE
+      - FOWNER
+      - SETUID
+      - SETGID
+    security_opt:
+      - no-new-privileges:true
+    tmpfs:
+      - /tmp:rw,size=64m
+      - /run/postgresql:rw,size=32m
+    environment:
+      - POSTGRES_USER=${POSTGRES_USER:-evolution}
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD:-evolution}
+      - POSTGRES_DB=${POSTGRES_DB:-evolution}
+    expose:
+      - "5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U evolution -d evolution"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
+  redis:
+    image: redis:8-alpine@sha256:978f0e01593e65eed801f2402944efcd936d43b5027e4908a7897baf88ed6241
+    container_name: evolution-redis
+    restart: unless-stopped
+    read_only: true
+    cap_drop:
+      - ALL
+    cap_add:
+      - CHOWN
+      - DAC_OVERRIDE
+      - FOWNER
+      - SETUID
+      - SETGID
+    security_opt:
+      - no-new-privileges:true
+    tmpfs:
+      - /tmp:rw,size=64m
+    expose:
+      - "6379"
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
+volumes:
+  cc_brief_data:
+  cc_brief_logs:
+  evolution_data:
+  postgres_data:
+  redis_data:

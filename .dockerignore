@@ -1,0 +1,26 @@
+node_modules
+npm-debug.log
+data/*.db
+data/*.txt
+data/*.json
+logs/*.log
+.env
+.env.production
+.git
+.gitignore
+README.md
+Dockerfile
+.dockerignore
+cc_agent_ssh_key*
+ssh-key*
+*.zip
+*.tar.gz
+*.key
+*.pem
+# stale committed build artifacts — fresh ones are generated inside the image
+apps/api/public/_next/
+apps/api/public/*.txt
+apps/api/public/*.rsc
+apps/api/public/*.meta
+apps/api/logs/
+apps/api/package-lock.json

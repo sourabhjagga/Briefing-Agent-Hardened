@@ -1,0 +1,138 @@
+name: Docker Publish Fresh
+
+on:
+  push:
+    branches: [ "main" ]
+  workflow_dispatch:
+  repository_dispatch:
+    types: [ docker-publish ]
+
+env:
+  REGISTRY: docker.io
+  # Always lowercase — Docker Hub rejects uppercase image names.
+  IMAGE_NAME: sourabhjagga/briefing-agent-fresh
+
+jobs:
+  # ──────────────────────────────────────────────────────────────────────
+  # JOB 0: gitleaks secret scan (history + working tree). Fail the build
+  # if any secret is detected — fresh-repo baseline stays clean.
+  # ──────────────────────────────────────────────────────────────────────
+  secret-scan:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.2.6
+        with:
+          fetch-depth: 0
+      - name: gitleaks scan
+        run: |
+          curl -sSfL https://github.com/gitleaks/gitleaks/releases/download/v8.30.1/gitleaks_8.30.1_linux_x64.tar.gz | tar xz
+          ./gitleaks git --no-banner --exit-code=1
+
+  # ──────────────────────────────────────────────────────────────────────
+  # JOB 1: Build the multi-arch image and push it to Docker Hub.
+  # ──────────────────────────────────────────────────────────────────────
+  build-and-push:
+    runs-on: ubuntu-latest
+    needs: secret-scan
+    outputs:
+      digest: ${{ steps.push.outputs.digest }}
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.2.6
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@c7c53464625b32c7a7e944ae62b3e17d2b600130 # v3.6.0
+        with:
+          platforms: arm64
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3.15.0
+        with:
+          driver-opts: image=moby/buildkit:latest
+
+      - name: Login to Docker Hub
+        uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3.4.0
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      # ── ARM64 smoke-test: build arm64 only, no push ──────────────────
+      # cache-from uses the PREVIOUS run's cache (by branch) so node_modules
+      # layer is still reused — only layers after a changed COPY are rebuilt.
+      # cache-to writes back using the same branch key so next run can reuse
+      # the npm ci layer (which rarely changes).
+      - name: Smoke-test ARM64 build (no push)
+        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6.19.0
+        with:
+          context: .
+          platforms: linux/arm64
+          push: false
+          load: false
+          provenance: false
+          # API key for the static dashboard is baked in at build time.
+          build-args: |
+            NEXT_PUBLIC_API_KEY=${{ secrets.DASHBOARD_API_KEY }}
+          # Use branch-scoped cache so npm ci layer is reused,
+          # but any file change (public/, src/) correctly invalidates
+          # downstream layers via normal Docker cache invalidation.
+          cache-from: type=gha,scope=arm64-test-${{ github.ref_name }}
+          cache-to: type=gha,mode=max,scope=arm64-test-${{ github.ref_name }}
+
+      # ── Multi-arch push ───────────────────────────────────────────────
+      # provenance:false prevents the attestation manifest from confusing
+      # Docker clients into pulling the wrong arch on ARM64 hosts.
+      - name: Build and push multi-arch image
+        id: push
+        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6.19.0
+        with:
+          context: .
+          platforms: linux/amd64,linux/arm64
+          push: true
+          provenance: false
+          build-args: |
+            NEXT_PUBLIC_API_KEY=${{ secrets.DASHBOARD_API_KEY }}
+          tags: |
+            ${{ env.IMAGE_NAME }}:latest
+            ${{ env.IMAGE_NAME }}:${{ github.sha }}
+          # cache-from: read from the branch-scoped cache (npm ci reuse)
+          # cache-to:   write back under the same key
+          # Docker's own layer invalidation guarantees that any changed file
+          # (public/app.js, src/*, etc.) causes all subsequent layers to
+          # rebuild — so the fresh files are always baked into the image.
+          cache-from: type=gha,scope=multiarch-${{ github.ref_name }}
+          cache-to: type=gha,mode=max,scope=multiarch-${{ github.ref_name }}
+
+  # ──────────────────────────────────────────────────────────────────────
+  # JOB 2: Verify the pushed manifest actually contains ARM64.
+  # ──────────────────────────────────────────────────────────────────────
+  verify-manifest:
+    runs-on: ubuntu-latest
+    needs: build-and-push
+
+    steps:
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3.15.0
+
+      - name: Login to Docker Hub
+        uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3.4.0
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: Inspect manifest and confirm linux/arm64 is present
+        run: |
+          echo "=== Inspecting manifest for ${{ env.IMAGE_NAME }}:latest ==="
+          docker buildx imagetools inspect ${{ env.IMAGE_NAME }}:latest
+
+          echo "=== Checking for linux/arm64 digest ==="
+          if docker buildx imagetools inspect ${{ env.IMAGE_NAME }}:latest | grep -q 'linux/arm64'; then
+            echo "linux/arm64 manifest confirmed present"
+          else
+            echo "ERROR: linux/arm64 manifest NOT found in pushed image!"
+            echo "The Oracle ARM64 VM will fail to pull this image."
+            exit 1
+          fi
