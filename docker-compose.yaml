@@ -3,15 +3,7 @@
 #   Every service drops ALL Linux capabilities and re-adds only the essential
 #   ones, enables no-new-privileges, and gets tmpfs for /tmp. Rootfs is
 #   read-only where the image only writes to mounted volumes + tmpfs.
-#
-#   Port exposure: postgres (5432), redis (6379) and evolution-api (8080) are
-#   INTERNAL ONLY (reachable via Docker DNS by service name). They are no
-#   longer published to 0.0.0.0. Only cc-brief-agent keeps a published port.
-#
-#   cc-brief-agent / evolution-api: NOT read-only — the agent image runs as
-#   root and spawns Chromium (needs writable cache/scratch outside /tmp), and
-#   evolution-api writes session data under its instance dir.
-# =============================================================================
+# ==============================================================================
 
 services:
   cc-brief-agent:
@@ -53,7 +45,7 @@ services:
       - cc_brief_data:/app/data
       - cc_brief_logs:/app/logs
     ports:
-      - "3456:3000"
+      - "3002:3000"
     environment:
       - TELEGRAM_BOT_TOKEN=${TELEGRAM_BOT_TOKEN}
       - TELEGRAM_CHAT_ID=${TELEGRAM_CHAT_ID}
