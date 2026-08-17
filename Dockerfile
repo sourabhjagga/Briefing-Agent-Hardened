@@ -4,6 +4,13 @@ ENV PUPPETEER_SKIP_CHROMIUM_DOWNLOAD=true
 
 WORKDIR /app
 
+# better-sqlite3 (api) needs a native build. Install python3/make/g++ so its
+# node-gyp step succeeds under node:24-slim (which ships without a toolchain).
+# python3 is only needed at install time in the builder.
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends python3 make g++ ca-certificates && \
+    rm -rf /var/lib/apt/lists/*
+
 COPY package.json ./
 COPY package-lock.json ./
 COPY apps/api/package.json ./apps/api/package.json
