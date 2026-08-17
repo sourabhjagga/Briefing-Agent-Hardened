@@ -26,6 +26,10 @@ COPY .npmrc ./
 # Retry up to 3x for transient network errors.
 RUN for i in 1 2 3; do npm ci --ignore-scripts && break || sleep $((i * 10)); done
 
+# Rebuild native modules (better-sqlite3) — npm ci --ignore-scripts skips
+# the postinstall that compiles the .node binary via node-gyp.
+RUN npm rebuild better-sqlite3
+
 COPY apps/dashboard ./apps/dashboard
 # NEXT_PUBLIC_API_KEY is baked into the static dashboard bundle so the browser
 # can authenticate its API calls. Pass it via --build-arg (GitHub Actions
