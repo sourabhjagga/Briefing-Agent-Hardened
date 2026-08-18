@@ -21,23 +21,23 @@
   "author": "Sourabh Jagga",
   "license": "MIT",
   "dependencies": {
-    "@google/generative-ai": "^0.11.0",
-    "@whiskeysockets/baileys": "^6.7.18",
-    "axios": "^1.7.2",
-    "better-sqlite3": "^11.7.0",
-    "cheerio": "^1.0.0",
-    "dotenv": "^16.4.5",
+    "@google/generative-ai": "^0.24.1",
+    "@whiskeysockets/baileys": "^6.17.16",
+    "axios": "^1.19.0",
+    "better-sqlite3": "^13.0.3",
+    "cheerio": "^1.2.0",
+    "dotenv": "^17.4.2",
     "express": "^4.19.2",
     "https-proxy-agent": "^9.1.0",
-    "imapflow": "^1.4.2",
+    "imapflow": "^1.7.1",
     "node-cron": "^4.6.0",
-    "pino": "^9.4.0",
+    "pino": "^10.3.1",
     "puppeteer": "^25.7.0",
     "puppeteer-extra": "^3.3.6",
     "puppeteer-extra-plugin-stealth": "^2.11.2",
     "qrcode-terminal": "^0.12.0",
     "socks-proxy-agent": "^10.1.0",
     "telegraf": "^4.16.3",
-    "telegram": "^2.22.6"
+    "telegram": "^2.26.22"
   }
 }

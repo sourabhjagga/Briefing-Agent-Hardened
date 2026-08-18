@@ -10,8 +10,8 @@
     "packages/*"
   ],
   "devDependencies": {
-    "turbo": "^2.3.0",
-    "typescript": "^5.0.0"
+    "turbo": "^2.10.10",
+    "typescript": "^7.0.2"
   },
   "overrides": {
     "undici": "7.29.0",
