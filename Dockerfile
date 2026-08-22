@@ -80,6 +80,10 @@ RUN apt-get update && \
 RUN groupadd -r agentsg && useradd -r -m -g agentsg agentuser
 
 COPY --from=builder /app/node_modules ./node_modules
+# npm nests version-conflicted deps under apps/api/node_modules (dotenv,
+# better-sqlite3, pino, libsignal, ...). The runner flattens apps/api into
+# /app, so merge them in or require() fails at runtime. Dir COPY merges.
+COPY --from=builder /app/apps/api/node_modules ./node_modules
 COPY --from=builder /app/apps/api/package.json ./package.json
 COPY --from=builder /app/apps/api/src ./src
 COPY --from=builder /app/apps/api/public ./public
