@@ -45,6 +45,10 @@ RUN rm -rf apps/api/public && mv apps/dashboard/out apps/api/public
 
 RUN npm run build --workspace=apps/api
 
+# The runner stage merge-COPYs this dir; keep it present even when the
+# lockfile hoists everything (empty dir = no-op copy).
+RUN mkdir -p /app/apps/api/node_modules
+
 FROM node:24-slim@sha256:3638d9a6fe4030bd716be989438248074489337ba3275657f93595428be4fc03 AS runner
 
 WORKDIR /app
