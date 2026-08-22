@@ -27,7 +27,7 @@
     "better-sqlite3": "^13.0.3",
     "cheerio": "^1.2.0",
     "dotenv": "^17.4.2",
-    "express": "^4.19.2",
+    "express": "^5.0.0",
     "https-proxy-agent": "^9.1.0",
     "imapflow": "^1.7.1",
     "node-cron": "^4.6.0",
