@@ -31,7 +31,6 @@ process.on('uncaughtException', (err) => {
 });
 
 const MessageDatabase = require('./database');
-const EvolutionApiClient = require('./evolution-client');
 const WhatsAppListener = require('./whatsapp');
 const TelegramUserListener = require('./telegram-user');
 const TelegramBotDispatcher = require('./telegram-bot');
@@ -43,9 +42,6 @@ const YoutubeScraper = require('./scrapers/youtube-scraper');
 const ApiScraper = require('./scrapers/api-scraper');
 const RssScraper = require('./scrapers/rss-scraper');
 const EmailScraper = require('./scrapers/email-scraper');
-
-// Feature flag: Use Evolution API for WhatsApp instead of Baileys
-const USE_EVOLUTION_API = process.env.USE_EVOLUTION_API === 'true';
 
 function validateConfig() {
   const required = ['TELEGRAM_BOT_TOKEN', 'TELEGRAM_CHAT_ID', 'GEMINI_API_KEY'];
@@ -62,24 +58,6 @@ function validateConfig() {
 
   if (!process.env.WHATSAPP_ADMIN_JID) {
     logger.warn('⚠️ WHATSAPP_ADMIN_JID is not set. WhatsApp alert delivery via sendSystemAlert will be skipped.');
-  }
-
-  // Validate Evolution API config if enabled
-  if (USE_EVOLUTION_API) {
-    if (!process.env.EVOLUTION_API_KEY) {
-      logger.error('❌ USE_EVOLUTION_API=true but EVOLUTION_API_KEY is not set');
-      process.exit(1);
-    }
-    if (!process.env.EVOLUTION_API_URL) {
-      logger.error('❌ USE_EVOLUTION_API=true but EVOLUTION_API_URL is not set');
-      process.exit(1);
-    }
-    if (!process.env.EVOLUTION_WEBHOOK_URL) {
-      logger.warn('⚠️ EVOLUTION_WEBHOOK_URL not set. Webhooks will not be configured automatically.');
-    }
-    logger.info('🔄 Using Evolution API for WhatsApp integration');
-  } else {
-    logger.info('🔄 Using Baileys (legacy) for WhatsApp integration');
   }
 }
 
@@ -154,24 +132,21 @@ function createBotInstances(database, summarizer) {
   return botInstances;
 }
 
-function startDashboardServer(database, whatsapp, telegramUser, scheduler, summarizer, botInstances, scrapers = {}, evolutionClient = null) {
+function startDashboardServer(database, whatsapp, telegramUser, scheduler, summarizer, botInstances, scrapers = {}) {
   const PORT = parseInt(process.env.HEALTH_PORT || '3000', 10);
   const app = express();
 
   // ── API authentication gate (hardening) ─────────────────────────────
   // All /api/* routes require the DASHBOARD_API_KEY header, EXCEPT:
   //  - /health (public, used by load balancer / Coolify)
-  //  - /api/whatsapp/webhook (Evolution API webhook; HMAC-verified in handleWebhook)
   //  - /api/webhook/:sourceId (external webhook sources; HMAC-verified per source when secret set)
-  // The webhook routes are excluded because external senders cannot know the dashboard key.
+  // The webhook route is excluded because external senders cannot know the dashboard key.
   // The dashboard (static export) must be configured with NEXT_PUBLIC_API_KEY
   // (or served by a proxy that injects the header) so browser calls authenticate.
   const DASHBOARD_API_KEY = process.env.DASHBOARD_API_KEY;
   app.use('/api', (req, res, next) => {
-    const publicPaths = ['/whatsapp/webhook'];
-    const isPublicWebhook = publicPaths.includes(req.path);
     const isSourceWebhook = /^\/webhook\/[^/]+$/.test(req.path);
-    if (isPublicWebhook || isSourceWebhook) {
+    if (isSourceWebhook) {
       return next();
     }
     if (!DASHBOARD_API_KEY) {
@@ -188,22 +163,6 @@ function startDashboardServer(database, whatsapp, telegramUser, scheduler, summa
   app.use(express.json());
   // Disable redirect so /sources doesn't get redirected to /sources/ (which breaks the catch-all)
   app.use(express.static(path.join(__dirname, '../public'), { redirect: false }));
-
-  // Evolution API webhook endpoint
-  if (USE_EVOLUTION_API && evolutionClient) {
-    app.post('/api/whatsapp/webhook', express.raw({ type: 'application/json' }), async (req, res) => {
-      try {
-        const signature = req.headers['x-hub-signature-256'] || req.headers['x-webhook-signature'];
-        const payload = req.body ? JSON.parse(req.body.toString()) : {};
-        const result = await evolutionClient.handleWebhook(payload, signature);
-        res.json(result);
-      } catch (err) {
-        logger.error(`Evolution API webhook error: ${err.message}`);
-        res.status(500).json({ error: err.message });
-      }
-    });
-    logger.info('🔗 Evolution API webhook endpoint registered at /api/whatsapp/webhook');
-  }
 
   app.get('/health', (req, res) => {
     const waStatus = whatsapp.getStatus();
@@ -783,7 +742,7 @@ function startDashboardServer(database, whatsapp, telegramUser, scheduler, summa
     }
   });
 
-  // WhatsApp discovery - works for both Evolution API and Baileys
+  // WhatsApp discovery
   app.get('/api/whatsapp/discover', async (req, res) => {
     try {
       if (!whatsapp) {
@@ -832,24 +791,6 @@ function startDashboardServer(database, whatsapp, telegramUser, scheduler, summa
       }
       res.json({ success: true });
     } catch (err) {
-      res.status(500).json({ error: err.message });
-    }
-  });
-
-  // Evolution API webhook endpoint
-  // This receives incoming WhatsApp messages from Evolution API
-  app.post('/api/whatsapp/webhook', express.raw({ type: 'application/json' }), async (req, res) => {
-    if (!USE_EVOLUTION_API || !evolutionClient) {
-      return res.status(404).json({ error: 'Evolution API not enabled' });
-    }
-    
-    const signature = req.headers['x-hub-signature-256'] || req.headers['x-webhook-signature'];
-    try {
-      const payload = JSON.parse(req.body.toString('utf8'));
-      const result = await evolutionClient.handleWebhook(payload, signature);
-      res.json(result);
-    } catch (err) {
-      logger.error(`WhatsApp webhook error: ${err.message}`);
       res.status(500).json({ error: err.message });
     }
   });
@@ -1038,26 +979,15 @@ function startDashboardServer(database, whatsapp, telegramUser, scheduler, summa
   app.get('/api/admin/verify-sessions', async (req, res) => {
     try {
       const results = {
-        evolutionApi: { connected: false, instanceExists: false, qrRequired: false, groupsSynced: 0, error: null },
+        whatsapp: { connected: false },
         telegramUser: { authorized: false },
-        volumes: { postgresData: false, evolutionData: false, appData: false }
+        volumes: { appData: false }
       };
 
-      // Check Evolution API instance
-      if (evolutionClient) {
-        try {
-          const state = await evolutionClient.getConnectionState();
-          results.evolutionApi.connected = state === 'open' || state === 'connected';
-          results.evolutionApi.instanceExists = true;
-          results.evolutionApi.qrRequired = state === 'connecting' || state === 'close';
-          
-          if (results.evolutionApi.connected) {
-            const groups = await evolutionClient.getAllChats();
-            results.evolutionApi.groupsSynced = groups.length;
-          }
-        } catch (e) {
-          results.evolutionApi.error = e.message;
-        }
+      // Check Baileys WhatsApp connection
+      if (whatsapp) {
+        const status = typeof whatsapp.getStatus === 'function' ? whatsapp.getStatus() : {};
+        results.whatsapp.connected = !!status.isReady;
       }
 
       // Check Telegram User
@@ -1067,8 +997,6 @@ function startDashboardServer(database, whatsapp, telegramUser, scheduler, summa
 
       // Check volume mounts
       const fs = require('fs');
-      results.volumes.postgresData = fs.existsSync('/var/lib/postgresql/data');
-      results.volumes.evolutionData = fs.existsSync('/evolution/instances');
       results.volumes.appData = fs.existsSync('/app/data');
 
       res.json(results);
@@ -1080,24 +1008,17 @@ function startDashboardServer(database, whatsapp, telegramUser, scheduler, summa
   // Force WhatsApp reconnection (triggers new QR generation) — GET/POST for dashboard convenience
   app.all('/api/admin/force-whatsapp-reconnect', async (req, res) => {
     try {
-      if (!evolutionClient) {
-        return res.status(503).json({ error: 'Evolution API not configured' });
+      if (!whatsapp || typeof global.restartWhatsApp !== 'function') {
+        return res.status(503).json({ error: 'WhatsApp not configured' });
       }
 
-      // Force Evolution API to restart the instance connection
-      await evolutionClient.http.post(`/instance/restart/${evolutionClient.instanceName}`);
-      
-      logger.info('WhatsApp instance restart triggered - new QR will be generated');
+      await global.restartWhatsApp(true);
 
-      // Wait a bit then check status
-      await new Promise(r => setTimeout(r, 3000));
-      const state = await evolutionClient.getConnectionState();
-      
+      logger.info('WhatsApp restart triggered - new QR will be generated');
+
       res.json({
         success: true,
-        message: 'Instance restart triggered',
-        state,
-        qrRequired: state === 'connecting' || state === 'close'
+        message: 'WhatsApp restart triggered. A new QR will be generated shortly.'
       });
     } catch (err) {
       logger.error(`Force reconnect failed: ${err.message}`);
@@ -1105,23 +1026,17 @@ function startDashboardServer(database, whatsapp, telegramUser, scheduler, summa
     }
   });
 
-  // Reset WhatsApp connection (delete + recreate instance for fresh QR) — clears stale/removed session
+  // Reset WhatsApp connection (wipe session for fresh QR) — clears stale/removed session
   app.delete('/api/admin/reset-whatsapp', async (req, res) => {
     try {
-      if (!evolutionClient) {
-        return res.status(503).json({ error: 'Evolution API not configured' });
+      if (!whatsapp) {
+        return res.status(503).json({ error: 'WhatsApp not configured' });
       }
-      await evolutionClient.resetInstance();
-      // Give Evolution a moment to generate the QR after recreation
-      await new Promise(r => setTimeout(r, 3000));
-      const qr = await evolutionClient.fetchFreshQr(true);
-      const state = await evolutionClient.getConnectionState();
-      logger.info('WhatsApp instance reset - new QR generated');
+      await global.restartWhatsApp(true);
+      logger.info('WhatsApp session reset - new QR will be generated');
       res.json({
         success: true,
-        message: 'WhatsApp connection reset. Scan the new QR to re-pair.',
-        qr: qr || null,
-        state
+        message: 'WhatsApp connection reset. Scan the new QR to re-pair.'
       });
     } catch (err) {
       logger.error(`Reset WhatsApp failed: ${err.message}`);
@@ -1291,33 +1206,11 @@ async function main() {
 
   let whatsapp;
   let telegramUser;
-  let evolutionClient = null;
 
-  if (USE_EVOLUTION_API) {
-    // Use Evolution API for WhatsApp
-    const EvolutionApiClient = require('./evolution-client');
-    evolutionClient = new EvolutionApiClient(database, null, {
-      baseUrl: process.env.EVOLUTION_API_URL,
-      apiKey: process.env.EVOLUTION_API_KEY,
-      instanceName: process.env.EVOLUTION_INSTANCE_NAME || 'cc-brief',
-      webhookUrl: process.env.EVOLUTION_WEBHOOK_URL,
-      webhookSecret: process.env.WEBHOOK_SECRET
-    });
-    
-    // Initialize Evolution API client (creates instance, connects, sets up webhook)
-    await evolutionClient.initialize();
-    whatsapp = evolutionClient;
-    
-    // Telegram user listener still uses Baileys
-    const TelegramUserListener = require('./telegram-user');
-    telegramUser = new TelegramUserListener(database, null);
-  } else {
-    // Legacy Baileys implementation
-    const WhatsAppListener = require('./whatsapp');
-    const TelegramUserListener = require('./telegram-user');
-    whatsapp = new WhatsAppListener(database, null);
-    telegramUser = new TelegramUserListener(database, null);
-  }
+  const WhatsAppListener = require('./whatsapp');
+  const TelegramUserListener = require('./telegram-user');
+  whatsapp = new WhatsAppListener(database, null);
+  telegramUser = new TelegramUserListener(database, null);
   
   const scheduler = new Scheduler(summarizer, botInstances, database, whatsapp);
 
@@ -1353,13 +1246,10 @@ async function main() {
 
   const apiScraper = new ApiScraper(database, sendSystemAlert);
 
-  // Global restart function - works for both implementations
+  // Global restart function
   global.restartWhatsApp = async (force = false) => {
     logger.warn('🔄 Received global request to restart WhatsApp client...');
-    if (USE_EVOLUTION_API && evolutionClient) {
-      // For Evolution API, just reconnect the instance
-      await evolutionClient.reconnect(force);
-    } else if (whatsapp && typeof whatsapp.stop === 'function') {
+    if (whatsapp && typeof whatsapp.stop === 'function') {
       await whatsapp.stop();
       if (force) {
         const authPath = path.resolve(__dirname, '../data/baileys_auth');
@@ -1388,7 +1278,7 @@ async function main() {
   };
 
   const healthServer = startDashboardServer(
-    database, whatsapp, telegramUser, scheduler, summarizer, botInstances, scrapers, evolutionClient
+    database, whatsapp, telegramUser, scheduler, summarizer, botInstances, scrapers
   );
 
   for (const [slug, bot] of botInstances) {
@@ -1402,9 +1292,8 @@ async function main() {
     }
   }
 
-  // Start WhatsApp only for legacy Baileys implementation
-  // Evolution API is already initialized in main()
-  if (!USE_EVOLUTION_API && whatsapp) {
+  // Start WhatsApp listener
+  if (whatsapp) {
     whatsapp.start().catch(err => logger.error(`WhatsApp listener failed: ${err.message}`));
   }
   
@@ -1443,13 +1332,9 @@ async function main() {
     rssScraper.stop();
     apiScraper.stop();
     
-    // Stop WhatsApp - different for Evolution API vs Baileys
+    // Stop WhatsApp
     if (whatsapp) {
-      if (USE_EVOLUTION_API) {
-        await whatsapp.stop();
-      } else {
-        await whatsapp.stop();
-      }
+      await whatsapp.stop();
     }
     
     await telegramUser.logout();
