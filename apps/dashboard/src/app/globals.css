@@ -1,8 +1,6 @@
 @import "tailwindcss";
 
 @layer base {
-
-@layer base {
   :root {
     --background: 248 250 252;
     --surface: 255 255 255;
