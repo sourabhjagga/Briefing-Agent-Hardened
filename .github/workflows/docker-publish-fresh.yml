@@ -10,7 +10,7 @@ on:
 env:
   REGISTRY: docker.io
   # Always lowercase — Docker Hub rejects uppercase image names.
-  IMAGE_NAME: sourabhjagga/briefing-agent-fresh
+  IMAGE_NAME: sourabhjagga/briefing-agent-hardened
 
 jobs:
   # ──────────────────────────────────────────────────────────────────────

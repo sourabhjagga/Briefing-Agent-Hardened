@@ -10,7 +10,7 @@ services:
     # Pull pre-built image from Docker Hub instead of building from source.
     # This is pushed automatically by .github/workflows/docker-publish-fresh.yml
     # on every push to main. No local build needed on the host.
-    image: sourabhjagga/briefing-agent-fresh:${IMAGE_TAG:-latest}
+    image: sourabhjagga/briefing-agent-hardened:${IMAGE_TAG:-latest}
     # Always pull the latest image from Docker Hub on every deploy.
     # This ensures Coolify never uses a stale cached layer and always
     # runs the image built by the most recent GitHub Actions workflow run.

@@ -203,7 +203,7 @@ briefing-agent/
 ```yaml
 services:
   cc-brief-agent:
-    image: sourabhjagga/briefing-agent-fresh:latest
+    image: sourabhjagga/briefing-agent-hardened:latest
     pull_policy: always
     volumes:
       - cc_brief_data:/app/data      # SQLite, baileys_auth, cookies
