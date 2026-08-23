@@ -21,15 +21,23 @@ constructor(database, onAlert) {
     this._sessionSavePending = false;
     
     // Load API credentials strictly from environment — no hardcoded fallbacks.
-    // Ensure TELEGRAM_API_ID and TELEGRAM_API_HASH are set in your .env file.
-    // Get them from: https://my.telegram.org/apps
+    // Optional integration: without them the app boots fine and only
+    // private-channel MTProto scraping stays disabled.
+    this.isListening = false;
+    this.tempPhone = null;
+    this.tempPhoneCodeHash = null;
+    this.tempResolver = null;
+
     const apiId = parseInt(process.env.TELEGRAM_API_ID || '0', 10);
     const apiHash = process.env.TELEGRAM_API_HASH || '';
 
     if (!apiId || !apiHash) {
-      throw new Error('TELEGRAM_API_ID and TELEGRAM_API_HASH must be set in environment. Get them from https://my.telegram.org/apps');
+      this.enabled = false;
+      logger.warn('⚠️ TELEGRAM_API_ID / TELEGRAM_API_HASH not set — private Telegram channel scraping disabled. Get them from https://my.telegram.org/apps');
+      return;
     }
-    
+
+    this.enabled = true;
     this.apiId = apiId;
     this.apiHash = apiHash;
     
@@ -70,6 +78,7 @@ constructor(database, onAlert) {
   }
 
   async start() {
+    if (!this.enabled) return false;
     try {
       logger.info('📱 Starting Telegram User client...');
       await this.client.connect();
@@ -118,6 +127,7 @@ constructor(database, onAlert) {
   }
 
   async sendCode(phoneNumber) {
+    if (!this.enabled) return { success: false, error: 'TELEGRAM_API_ID/TELEGRAM_API_HASH not configured' };
     this.tempPhone = phoneNumber;
     try {
       const result = await this.client.invoke(new Api.auth.SendCode({
@@ -168,6 +178,7 @@ constructor(database, onAlert) {
   }
 
   async logout() {
+    if (!this.enabled) return { success: true };
     try {
       await this.client.invoke(new Api.auth.LogOut());
     } catch (e) { /* ignore */ }
@@ -294,6 +305,7 @@ constructor(database, onAlert) {
   }
 
   async discoverGroups() {
+    if (!this.enabled) return [];
     try {
       const dialogs = await this.client.getDialogs({ limit: 100 });
       const groups = [];
