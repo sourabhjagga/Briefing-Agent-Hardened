@@ -18,6 +18,26 @@ const path = require('path');
 const logger = require('../logger');
 
 class YoutubeScraper {
+  static _spawnWithTimeout(args, timeoutMs = 5 * 60 * 1000) {
+    return new Promise((resolve, reject) => {
+      const proc = spawn('yt-dlp', args);
+      let stderr = '';
+      const timer = setTimeout(() => {
+        proc.kill('SIGKILL');
+        reject(new Error(`yt-dlp timed out after ${timeoutMs / 1000}s`));
+      }, timeoutMs);
+      proc.stderr.on('data', (data) => { stderr += data.toString(); });
+      proc.on('close', (code) => {
+        clearTimeout(timer);
+        if (code === 0) resolve();
+        else reject(new Error(`yt-dlp exited with code ${code}: ${stderr.trim()}`.substring(0, 300)));
+      });
+      proc.on('error', (err) => {
+        clearTimeout(timer);
+        reject(new Error(`Failed to spawn yt-dlp: ${err.message}`));
+      });
+    });
+  }
   constructor(database, summarizer) {
     this.database = database;
     this.summarizer = summarizer;
@@ -193,7 +213,8 @@ class YoutubeScraper {
         }
 
         if (!summary || summary.includes('Failed to generate')) {
-          summary = `📄 <b>New video published:</b> ${video.title}\n🔗 https://youtu.be/${video.id}`;
+          const escTitle = String(video.title || '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+          summary = `📄 <b>New video published:</b> ${escTitle}\n🔗 https://youtu.be/${video.id}`;
         }
 
         this.database.saveMessage({
@@ -203,7 +224,7 @@ class YoutubeScraper {
           chatType: 'channel',
           senderName: source.name,
           senderNumber: '',
-          body: `🎥 <b>YouTube Video Summary</b>\n📌 <b>Title:</b> ${video.title}\n📅 <b>Published:</b> ${video.published.toISOString().split('T')[0]}\n\n${summary}\n\n🔗 <b>Watch:</b> https://youtu.be/${video.id}`,
+          body: `🎥 <b>YouTube Video Summary</b>\n📌 <b>Title:</b> ${escTitle}\n📅 <b>Published:</b> ${video.published.toISOString().split('T')[0]}\n\n${summary}\n\n🔗 <b>Watch:</b> https://youtu.be/${video.id}`,
           timestamp: Math.floor(Date.now() / 1000),
           hasMedia: false,
           mediaCaption: '',
@@ -235,6 +256,7 @@ class YoutubeScraper {
    * - Falls back to Google Search Grounding (Layer 3) if yt-dlp itself fails.
    */
   async transcribeAudioWithGemini(videoId) {
+    if (!/^[A-Za-z0-9_-]{11}$/.test(videoId)) throw new Error(`Invalid videoId: ${videoId}`);
     if (!this.genAI) {
       throw new Error('Gemini API key is not configured.');
     }
@@ -275,32 +297,13 @@ class YoutubeScraper {
           const expires = c.expirationDate || Math.floor(Date.now() / 1000) + 86400 * 365;
           return `${domain}\t${domainFlag}\t${p}\t${secure}\t${expires}\t${c.name}\t${c.value}`;
         });
-        fs.writeFileSync(cookiePath, `# Netscape HTTP Cookie File\n${netscapeLines.join('\n')}\n`);
+        fs.writeFileSync(cookiePath, `# Netscape HTTP Cookie File\n${netscapeLines.join('\n')}\n`, { mode: 0o600 });
         ytdlpArgs.push('--cookies', cookiePath);
         logger.debug(`🍪 Exported ${ytCookies.length} YouTube cookies from DB to yt-dlp.`);
       }
 
-      // Run yt-dlp as a child process
-      await new Promise((resolve, reject) => {
-        const proc = spawn('yt-dlp', ytdlpArgs);
-        let stderr = '';
-
-        proc.stderr.on('data', (data) => {
-          stderr += data.toString();
-        });
-
-        proc.on('close', (code) => {
-          if (code === 0) {
-            resolve();
-          } else {
-            reject(new Error(`yt-dlp exited with code ${code}: ${stderr.trim()}`.substring(0, 300)));
-          }
-        });
-
-        proc.on('error', (err) => {
-          reject(new Error(`Failed to spawn yt-dlp: ${err.message}`));
-        });
-      });
+      // Run yt-dlp as a child process (hard timeout so a hung download can't stack sessions)
+      await YoutubeScraper._spawnWithTimeout(ytdlpArgs);
 
       const audioBytes = fs.readFileSync(outputPath);
       logger.info(`🎙️ [yt-dlp] Downloaded ~${Math.round(audioBytes.length / 1024)} KB audio. Sending to Gemini 3.1 Flash Lite...`);
@@ -419,7 +422,7 @@ Provide a complete, long text explanation (~500 words) of the video content.`;
         videos.push({
           id: videoIdMatch[1],
           title: titleMatch[1].replace(/&amp;/g, '&').replace(/&lt;/g, '<').replace(/&gt;/g, '>'),
-          published: publishedMatch ? new Date(publishedMatch[1]) : new Date()
+          published: (() => { const d = publishedMatch ? new Date(publishedMatch[1]) : new Date(); return isNaN(d.getTime()) ? new Date() : d; })()
         });
       }
     }
@@ -432,6 +435,7 @@ Provide a complete, long text explanation (~500 words) of the video content.`;
    * captions directly from YouTube's caption API endpoint.
    */
   async fetchTranscriptDirect(videoId) {
+    if (!/^[A-Za-z0-9_-]{11}$/.test(videoId)) throw new Error(`Invalid videoId: ${videoId}`);
     logger.debug(`Fetching captions directly via HTTP for: ${videoId}`);
     const videoUrl = `https://www.youtube.com/watch?v=${videoId}`;
     const res = await axios.get(videoUrl, {
@@ -471,7 +475,7 @@ Provide a complete, long text explanation (~500 words) of the video content.`;
     if (!bestTrack) throw new Error('No suitable caption track found');
 
     let baseUrl = bestTrack.baseUrl;
-    if (baseUrl.includes('&fmt=') || !baseUrl.includes('fmt=')) {
+    if (!/[?&]fmt=/.test(baseUrl)) {
       baseUrl += (baseUrl.includes('?') ? '&' : '?') + 'fmt=srv3';
     }
     const captionRes = await axios.get(baseUrl, {
@@ -500,6 +504,7 @@ Provide a complete, long text explanation (~500 words) of the video content.`;
   }
 
   async fetchTranscript(videoId) {
+    if (!/^[A-Za-z0-9_-]{11}$/.test(videoId)) throw new Error(`Invalid videoId: ${videoId}`);
     logger.debug(`Fetching subtitles via yt-dlp --write-subs for: ${videoId}`);
 
     const tempDir = path.resolve(__dirname, '../../data/temp');
@@ -534,7 +539,7 @@ Provide a complete, long text explanation (~500 words) of the video content.`;
         const expires = c.expirationDate || Math.floor(Date.now() / 1000) + 86400 * 365;
         return `${domain}\t${domainFlag}\t${p}\t${secure}\t${expires}\t${c.name}\t${c.value}`;
       });
-      fs.writeFileSync(cookiePath, `# Netscape HTTP Cookie File\n${netscapeLines.join('\n')}\n`);
+      fs.writeFileSync(cookiePath, `# Netscape HTTP Cookie File\n${netscapeLines.join('\n')}\n`, { mode: 0o600 });
       ytdlpArgs.push('--cookies', cookiePath);
       logger.debug(`🍪 Exported ${ytCookies.length} YouTube cookies for subtitle fetch.`);
     }
@@ -542,16 +547,7 @@ Provide a complete, long text explanation (~500 words) of the video content.`;
     let subFiles = [];
 
     try {
-      await new Promise((resolve, reject) => {
-        const proc = spawn('yt-dlp', ytdlpArgs);
-        let stderr = '';
-        proc.stderr.on('data', (data) => { stderr += data.toString(); });
-        proc.on('close', (code) => {
-          if (code === 0) resolve();
-          else reject(new Error(`yt-dlp exited code ${code}: ${stderr.trim()}`.substring(0, 300)));
-        });
-        proc.on('error', (err) => reject(new Error(`Failed to spawn yt-dlp: ${err.message}`)));
-      });
+      await YoutubeScraper._spawnWithTimeout(ytdlpArgs);
 
       subFiles = fs.readdirSync(tempDir)
         .filter(f => f.startsWith(`sub_${videoId}`) && f.endsWith('.srt'))

@@ -55,10 +55,12 @@ class DatabaseManager {
 
       CREATE TABLE IF NOT EXISTS daily_briefs (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
-        brief_date TEXT UNIQUE,
+        brief_date TEXT NOT NULL,
+        category_slug TEXT NOT NULL DEFAULT 'cc',
         brief_text TEXT,
         message_count INTEGER DEFAULT 0,
-        created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+        created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+        UNIQUE(brief_date, category_slug)
       );
 
       CREATE TABLE IF NOT EXISTS summary_log (
@@ -145,6 +147,33 @@ class DatabaseManager {
       this.db.exec(`ALTER TABLE messages ADD COLUMN instance_fk INTEGER REFERENCES source_instances(id) ON DELETE SET NULL`);
       logger.info('📊 Migrated: added instance_fk column to messages');
     } catch (e) { /* already exists */ }
+
+    // Migrate: per-category daily briefs (was UNIQUE(brief_date) only — categories clobbered each other)
+    try {
+      const hasSlug = this.db.prepare(`PRAGMA table_info(daily_briefs)`).all().some(c => c.name === 'category_slug');
+      if (!hasSlug) {
+        this.db.transaction(() => {
+          this.db.exec(`
+            ALTER TABLE daily_briefs RENAME TO daily_briefs_old;
+            CREATE TABLE daily_briefs (
+              id INTEGER PRIMARY KEY AUTOINCREMENT,
+              brief_date TEXT NOT NULL,
+              category_slug TEXT NOT NULL DEFAULT 'cc',
+              brief_text TEXT,
+              message_count INTEGER DEFAULT 0,
+              created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+              UNIQUE(brief_date, category_slug)
+            );
+            INSERT INTO daily_briefs (brief_date, category_slug, brief_text, message_count, created_at)
+              SELECT brief_date, 'cc', brief_text, message_count, created_at FROM daily_briefs_old;
+            DROP TABLE daily_briefs_old;
+          `);
+        })();
+        logger.info('📊 Migrated: daily_briefs now keyed by (brief_date, category_slug)');
+      }
+    } catch (e) {
+      logger.warn(`daily_briefs migration skipped: ${e.message}`);
+    }
 
     // Migrate: add delivery_channel column if not present (for existing installs)
     try {
@@ -370,8 +399,8 @@ class DatabaseManager {
         LIMIT 50
       `),
       saveBrief: this.db.prepare(`
-        INSERT OR REPLACE INTO daily_briefs (brief_date, brief_text, message_count)
-        VALUES (?, ?, ?)
+        INSERT OR REPLACE INTO daily_briefs (brief_date, category_slug, brief_text, message_count)
+        VALUES (?, ?, ?, ?)
       `),
       getBrief: this.db.prepare(`
         SELECT * FROM daily_briefs WHERE brief_date = ?
@@ -471,7 +500,6 @@ class DatabaseManager {
       `),
       toggleSource: this.db.prepare(`UPDATE sources SET is_active = ? WHERE id = ?`),
       updateSource: this.db.prepare(`UPDATE sources SET name = ?, type = ?, category_slug = ?, url = ?, is_private = ? WHERE id = ?`),
-      updateSourceType: this.db.prepare(`UPDATE sources SET type = ? WHERE id = ?`),
       deleteSource: this.db.prepare(`DELETE FROM sources WHERE id = ?`),
       getAllCategories: this.db.prepare(`SELECT * FROM categories ORDER BY created_at ASC`),
       getActiveCategories: this.db.prepare(`SELECT * FROM categories WHERE is_active = 1 ORDER BY created_at ASC`),
@@ -609,7 +637,7 @@ class DatabaseManager {
   }
 
   saveBrief(date, briefText, messageCount, categorySlug = 'cc') {
-    this.statements.saveBrief.run(date, briefText, messageCount);
+    this.statements.saveBrief.run(date, categorySlug || 'cc', briefText, messageCount);
     if (categorySlug && categorySlug !== 'cc') {
       logger.info(`[DB] saveBrief called for category "${categorySlug}" — stored in shared daily_briefs table.`);
     }
@@ -715,7 +743,6 @@ class DatabaseManager {
   updateSource(id, name, type, categorySlug = null, url = null, isPrivate = 0) {
     this.statements.updateSource.run(name, type, categorySlug, url || null, isPrivate, id);
   }
-  updateSourceType(id, type) { this.statements.updateSourceType.run(type, id); }
   deleteSource(id) {
     const stmt = this.db.prepare('DELETE FROM source_instances WHERE source_fk = ?');
     this.db.transaction(() => {

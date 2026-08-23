@@ -24,8 +24,14 @@ class EmailScraper {
   }
 
   async scrapeAll() {
-    const sources = this.database.getAllSources()
-      .filter(s => s.is_active && s.type.endsWith('email') && s.url);
+    let sources = [];
+    try {
+      sources = this.database.getAllSources()
+        .filter(s => s.is_active && s.type.endsWith('email') && s.url);
+    } catch (err) {
+      logger.error(`📧 Failed to load email sources: ${err.message}`);
+      return;
+    }
 
     if (sources.length === 0) {
       logger.debug('📧 No active email sources found.');
@@ -65,6 +71,8 @@ class EmailScraper {
       await client.logout();
     } catch (err) {
       logger.error(`📧 IMAP connection error: ${err.message}`);
+    } finally {
+      try { client.close(); } catch { /* already closed */ }
     }
   }
 
@@ -73,7 +81,7 @@ class EmailScraper {
       const sourceEmail = source.url.trim().toLowerCase();
       if (!sourceEmail) return;
 
-      const searchQuery = `UNSEEN FROM "${sourceEmail}"`;
+      const searchQuery = `UNSEEN FROM "${sourceEmail.replace(/(["\\])/g, '\\$1')}"`;
       const messages = [];
 
       for await (const msg of client.fetch(searchQuery, { envelope: true, source: true })) {
@@ -84,9 +92,24 @@ class EmailScraper {
         let plainText = '';
         try {
           const src = msg.source.toString();
-          const textPlainMatch = src.match(/Content-Type:\s*text\/plain[\s\S]*?\n\n([\s\S]*?)(?=\n--|\nContent-|$)/i);
+          const textPlainMatch = src.match(/Content-Type:\s*text\/plain[^\n]*(?:\n[^\n]+)*?\n\n([\s\S]*?)(?=\n--|\nContent-|$)/i);
           if (textPlainMatch) {
-            plainText = textPlainMatch[1].trim();
+            let raw = '';
+            const headerEnd = src.indexOf('Content-Type: text/plain');
+            if (headerEnd !== -1) {
+              const blankLine = src.indexOf('\n\n', headerEnd);
+              if (blankLine !== -1) {
+                const headers = src.slice(headerEnd, blankLine);
+                raw = textPlainMatch[1];
+                const enc = (headers.match(/Content-Transfer-Encoding:\s*(\S+)/i) || [])[1] || '';
+                if (/base64/i.test(enc)) {
+                  try { raw = Buffer.from(raw.replace(/\s+/g, ''), 'base64').toString('utf-8'); } catch { /* keep raw */ }
+                } else if (/quoted-printable/i.test(enc)) {
+                  raw = raw.replace(/=\r?\n/g, '').replace(/=([0-9A-Fa-f]{2})/g, (_, h) => String.fromCharCode(parseInt(h, 16)));
+                }
+              }
+            }
+            plainText = raw.trim();
           } else {
             plainText = src.replace(/<[^>]*>/g, '').trim();
           }

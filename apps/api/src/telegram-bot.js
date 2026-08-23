@@ -12,7 +12,11 @@ function esc(str) {
   return str.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
 }
 
-const VALID_TAGS = new Set(['b', 'i', 'u', 's', 'a', 'code', 'pre', 'em', 'strong', 'span', 'br', 'p']);
+const VALID_TAGS = new Set(['b', 'i', 'u', 's', 'a', 'code', 'pre', 'em', 'strong', 'span']);
+
+function normalizeTelegramHtml(text) {
+    return text.replace(/<br\s*\/?>/gi, '\n').replace(/<\/?p(?:\s[^>]*)?>/gi, '\n\n');
+}
 
 function sanitizeMarkdown(text) {
     const parts = [];
@@ -59,27 +63,32 @@ function sanitizeMarkdown(text) {
 const MAX_MESSAGE_LENGTH = 4096;
 
 function splitMessage(text) {
-    if (text.length <= MAX_MESSAGE_LENGTH) {
-        return [text];
-    }
+    // Reserve room for the "(N/M)\n" prefix so chunks never exceed the limit
+    const LIMIT = MAX_MESSAGE_LENGTH - 16;
 
-    const chunks = [];
+    const hardChunks = [];
     let currentChunk = '';
 
-    const lines = text.split('\n');
-    for (const line of lines) {
-        if (currentChunk.length + line.length + 1 > MAX_MESSAGE_LENGTH) {
-            chunks.push(currentChunk);
+    for (const rawLine of text.split('\n')) {
+        // Hard-cut any single line longer than the limit
+        let line = rawLine;
+        while (line.length > LIMIT) {
+            if (currentChunk) { hardChunks.push(currentChunk); currentChunk = ''; }
+            hardChunks.push(line.slice(0, LIMIT));
+            line = line.slice(LIMIT);
+        }
+        if (currentChunk.length + line.length + 1 > LIMIT) {
+            hardChunks.push(currentChunk);
             currentChunk = line;
         } else {
             currentChunk += (currentChunk.length > 0 ? '\n' : '') + line;
         }
     }
     if (currentChunk.length > 0) {
-        chunks.push(currentChunk);
+        hardChunks.push(currentChunk);
     }
 
-    return chunks.map((chunk, index) => `(${index + 1}/${chunks.length})\n${chunk}`);
+    return hardChunks.map((chunk, index) => `(${index + 1}/${hardChunks.length})\n${chunk}`);
 }
 
 
@@ -365,7 +374,7 @@ class TelegramBotDispatcher {
 
   async sendMessage(text) {
     try {
-      const rawChunks = splitMessage(text);
+      const rawChunks = splitMessage(normalizeTelegramHtml(text));
       const chunks = rawChunks.map(c => sanitizeMarkdown(c));
       for (let i = 0; i < chunks.length; i++) {
         const chunk = chunks[i];
@@ -417,7 +426,8 @@ class TelegramBotDispatcher {
   }
 
   async stop() {
-    this.bot.stop();
+    if (!this.bot) return;
+    try { await this.bot.stop(); } catch (e) { /* already stopped */ }
     logger.info('Telegram Bot dispatcher stopped.');
   }
 }

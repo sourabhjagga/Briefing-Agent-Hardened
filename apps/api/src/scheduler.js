@@ -14,6 +14,7 @@ class Scheduler {
     this.database = database;
     this.whatsapp = whatsapp;
     this.jobs = []; // { job, ruleId, categorySlug, label }
+    this._running = new Set(); // per-slug brief locks
   }
 
   start() {
@@ -33,7 +34,7 @@ class Scheduler {
   _armAllRules() {
     // Stop existing category jobs (keep __cleanup)
     this.jobs = this.jobs.filter(j => {
-      if (j.ruleId !== null) { j.job.stop(); return false; }
+      if (j.ruleId !== null) { j.job.destroy(); return false; }
       return true;
     });
 
@@ -75,11 +76,24 @@ class Scheduler {
   }
 
   async _runSingleCategoryBrief(slug, isManualTrigger = false) {
+    if (this._running.has(slug)) {
+      logger.warn(`⏭️ Brief for "${slug}" already running — skipping overlapping fire.`);
+      return;
+    }
     const botInstance = this.botInstances.get(slug);
     if (!botInstance) {
       logger.warn(`⚠️ No bot instance for category "${slug}". Skipping.`);
       return;
     }
+    this._running.add(slug);
+    try {
+      await this._runSingleCategoryBriefLocked(slug, isManualTrigger);
+    } finally {
+      this._running.delete(slug);
+    }
+  }
+
+  async _runSingleCategoryBriefLocked(slug, isManualTrigger = false) {
     const cat = this.database.getCategoryBySlug(slug);
     await this._runSummaryJob(slug, botInstance, cat ? cat.ai_prompt : undefined, isManualTrigger);
   }
@@ -146,7 +160,11 @@ class Scheduler {
         }
         
         if (shouldSendWhatsApp && deliveryJid) {
-          await this.whatsapp.sendMessage(deliveryJid, `🤷‍♂️ *No new updates!*\n\nNo new messages captured from your monitored ${sourcePrefix.toUpperCase()} sources since the last brief.`);
+          try {
+            await this.whatsapp.sendMessage(deliveryJid, `🤷‍♂️ *No new updates!*\n\nNo new messages captured from your monitored ${sourcePrefix.toUpperCase()} sources since the last brief.`);
+          } catch (e) {
+            logger.error(`Failed to send WhatsApp 'No updates' for ${sourcePrefix}: ${e.message}`);
+          }
         }
         if (shouldSendTelegram && telegramInstance) {
           try {
@@ -188,9 +206,11 @@ class Scheduler {
       }
       
       // Delivery: Telegram
+      let telegramSent = false;
       if (shouldSendTelegram && telegramInstance) {
         try {
           await telegramInstance.sendMessage(summary);
+          telegramSent = true;
         } catch (e) {
           logger.error(`Failed to send Telegram briefing for ${sourcePrefix}: ${e.message}`);
         }
@@ -204,7 +224,7 @@ class Scheduler {
       // Persist briefs and summaries
       try {
         if (typeof this.database.saveSummary === 'function') {
-          this.database.saveSummary(today, messages.length, summary, true, sourcePrefix);
+          this.database.saveSummary(today, messages.length, summary, telegramSent, sourcePrefix);
         }
         if (typeof this.database.saveBrief === 'function') {
           this.database.saveBrief(today, summary, messages.length, sourcePrefix);
@@ -263,7 +283,7 @@ class Scheduler {
 
   stop() {
     logger.info('Stopping all scheduler cron jobs...');
-    this.jobs.forEach(j => j.job.stop());
+    this.jobs.forEach(j => j.job.destroy());
     this.jobs = [];
     logger.info('Scheduler successfully stopped.');
   }

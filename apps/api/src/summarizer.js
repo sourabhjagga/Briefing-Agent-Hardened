@@ -234,7 +234,7 @@ STRICT RULES:
     const urlMap = this._extractDealUrls(groupedMessages);
     const urlMapEntries = Object.entries(urlMap);
     const urlMapSection = urlMapEntries.length > 0
-      ? `\n⚠️ DEAL URL REFERENCE MAP — CRITICAL:\nEvery deal listed below MUST use the exact URL from this map for its <a href> link.\nDO NOT invent, omit, or modify any URL. Copy them character-for-character.\n${urlMapEntries.map(([title, url]) => `• ${title}\n  URL: ${url}`).join('\n')}\n`
+      ? `\n⚠️ DEAL URL REFERENCE MAP — CRITICAL:\nEvery deal listed below MUST use the exact URL from this map for its <a href> link.\nDO NOT invent, omit, or modify any URL. Copy them character-for-character.\n${urlMapEntries.map(([title, url]) => `• ${title.substring(0, 80)}\n  URL: ${url}`).join('\n')}\n`
       : '';
 
     if (customPrompt) {
@@ -335,13 +335,13 @@ STRICT RULES:
         for (const pattern of titlePatterns) {
           const m = msg.body.match(pattern);
           if (m) {
-            title = m[1].replace(/<[^>]+>/g, '').trim().substring(0, 80);
+            title = m[1].replace(/<[^>]+>/g, '').trim();
             break;
           }
         }
 
         if (!title) {
-          title = msg.body.replace(/<[^>]+>/g, '').trim().split('\n')[0].substring(0, 80);
+          title = msg.body.replace(/<[^>]+>/g, '').trim().split('\n')[0];
         }
 
         if (title) {
@@ -395,6 +395,12 @@ STRICT RULES:
     summary = summary.replace(/(?<!\*)\*(?!\*)(.*?)(?<!\*)\*(?!\*)/gs, '<i>$1</i>');
     summary = summary.replace(/__(.*?)__/gs, '<u>$1</u>');
     summary = summary.replace(/<\/?(?!(?:b|i|code|a|u|s|pre|em|strong|ins|del)\b)[^>]+>/g, '');
+    // Strip event handlers; keep only http(s)/mailto href values on surviving <a> tags
+    summary = summary.replace(/\son\w+\s*=\s*(?:"[^"]*"|'[^']*'|[^\s>]+)/gi, '');
+    summary = summary.replace(/href\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s>]+))/gi, (m, d, sq, u) => {
+      const val = (d !== undefined ? d : sq !== undefined ? sq : u || '').trim();
+      return /^(https?:\/\/|mailto:)/i.test(val) ? `href="${val}"` : '';
+    });
     summary = this._repairTelegramHtml(summary);
     return summary;
   }

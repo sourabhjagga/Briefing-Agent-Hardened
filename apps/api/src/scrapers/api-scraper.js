@@ -23,8 +23,14 @@ class ApiScraper {
   }
 
   async scrapeAll() {
-    const sources = this.database.getAllSources()
-      .filter(s => s.is_active && s.type.endsWith('api') && s.url);
+    let sources = [];
+    try {
+      sources = this.database.getAllSources()
+        .filter(s => s.is_active && s.type.endsWith('api') && s.url);
+    } catch (err) {
+      logger.error(`📡 Failed to load API sources: ${err.message}`);
+      return;
+    }
 
     for (const source of sources) {
       await this._scrapeEndpoint(source);
@@ -52,14 +58,19 @@ class ApiScraper {
         const message = item.title || item.headline || item.text || item.body || item.content || JSON.stringify(item).slice(0, 500);
         const url = item.link || item.url || item.permalink;
         const messageText = url ? `${message}\n${url}` : message;
+        // Stable namespaced ID + timestamp so dedupe works and items show up in briefs
+        const publishedTs = item.timestamp || item.published_at || item.date || item.created_at
+          ? Math.floor(new Date(item.timestamp || item.published_at || item.date || item.created_at).getTime() / 1000)
+          : Math.floor(Date.now() / 1000);
 
         this.database.saveMessage({
-          messageId,
+          messageId: `api_${source.source_id}_${messageId}`,
           groupName: source.name,
           groupId: source.source_id,
           chatType: 'api',
           sourceType: source.type,
-          message: messageText,
+          body: messageText,
+          timestamp: Number.isNaN(publishedTs) || !publishedTs ? Math.floor(Date.now() / 1000) : publishedTs,
           senderName: source.name,
           instanceFk
         });

@@ -8,7 +8,7 @@ class RssScraper {
     this.active = false;
     this.interval = null;
     this.consecutiveFailures = {};
-    this.isSessionAlerted = false;
+    this.alertedSources = new Set();
   }
 
   async start() {
@@ -27,7 +27,13 @@ class RssScraper {
   }
 
   async scrape() {
-    const sources = this.database.getAllSources().filter(s => s.is_active && s.type.endsWith('rss') && s.url);
+    let sources;
+    try {
+      sources = this.database.getAllSources().filter(s => s.is_active && s.type.endsWith('rss') && s.url);
+    } catch (err) {
+      logger.error(`📰 Failed to load RSS sources: ${err.message}`);
+      return;
+    }
 
     for (const source of sources) {
       if (!this.active) break;
@@ -69,7 +75,7 @@ class RssScraper {
             chatType: 'rss',
             senderName: source.name,
             body: item.title + (summary ? `\n\n${summary}` : '') + `\n🔗 ${link}`,
-            timestamp: item.date ? Math.floor(new Date(item.date).getTime() / 1000) : Math.floor(Date.now() / 1000),
+            timestamp: (() => { const t = item.date ? new Date(item.date).getTime() : NaN; return Number.isFinite(t) ? Math.floor(t / 1000) : Math.floor(Date.now() / 1000); })(),
             sourceType: source.type,
             instanceFk,
             url: link,
@@ -80,14 +86,15 @@ class RssScraper {
         logger.info(`✅ RSS: ${source.name} — saved ${saved} new items`);
         this.database.upsertScraperHealth(source.source_id, source.type, true, null);
         this.consecutiveFailures[source.source_id] = 0;
+        this.alertedSources.delete(source.source_id);
       } catch (err) {
         logger.error(`RSS feed error for ${source.name}: ${err.message}`);
         this.consecutiveFailures[source.source_id] = (this.consecutiveFailures[source.source_id] || 0) + 1;
         this.database.upsertScraperHealth(source.source_id, source.type, false, err.message);
 
-        if (this.consecutiveFailures[source.source_id] >= 3 && !this.isSessionAlerted && this.sendSystemAlert) {
+        if (this.consecutiveFailures[source.source_id] >= 3 && !this.alertedSources.has(source.source_id) && this.sendSystemAlert) {
           this.sendSystemAlert(`⚠️ <b>RSS Feed Failure</b>\n\nFeed "${source.name}" (${source.url}) has failed ${this.consecutiveFailures[source.source_id]} consecutive times.\nError: ${err.message}`);
-          this.isSessionAlerted = true;
+          this.alertedSources.add(source.source_id);
         }
       }
     }

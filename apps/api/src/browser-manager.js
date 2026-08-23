@@ -17,6 +17,7 @@ puppeteer.use(StealthPlugin());
 class BrowserManager {
   constructor() {
     this.browser = null;
+    this._launchPromise = null;
     this.activePagesCount = 0;
     this.idleTimeoutId = null;
     this.idleLimit = 2 * 60 * 1000; // 2 minutes in milliseconds
@@ -33,10 +34,13 @@ class BrowserManager {
     if (this.browser) {
       return this.browser;
     }
+    if (this._launchPromise) {
+      return this._launchPromise;
+    }
 
     logger.info('🌐 Spawning headless Chromium browser with Puppeteer Stealth...');
     try {
-      this.browser = await puppeteer.launch({
+      this._launchPromise = puppeteer.launch({
         executablePath: this.executablePath,
         headless: 'new',
         args: [
@@ -52,8 +56,15 @@ class BrowserManager {
         ]
       });
       logger.info('✅ Headless Chromium successfully started!');
-      return this.browser;
+      this.browser.on('disconnected', () => {
+        logger.warn('🌐 Chromium disconnected — clearing singleton for relaunch.');
+        this.browser = null;
+      });
+      const b = this.browser;
+      this._launchPromise = null;
+      return b;
     } catch (err) {
+      this._launchPromise = null;
       logger.error(`Failed to launch Chromium browser: ${err.message}`);
       throw err;
     }
@@ -79,10 +90,16 @@ class BrowserManager {
 
     // Custom close wrapper to safely decrement pages and start idle clock
     const originalClose = page.close.bind(page);
+    let closed = false;
     page.close = async () => {
-      await originalClose();
-      this.activePagesCount = Math.max(0, this.activePagesCount - 1);
-      this._startIdleTimer();
+      if (closed) { await originalClose().catch(() => {}); return; }
+      closed = true;
+      try {
+        await originalClose();
+      } finally {
+        this.activePagesCount = Math.max(0, this.activePagesCount - 1);
+        this._startIdleTimer();
+      }
     };
 
     return page;

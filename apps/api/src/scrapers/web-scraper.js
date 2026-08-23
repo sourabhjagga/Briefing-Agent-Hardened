@@ -1,9 +1,18 @@
 const cheerio = require('cheerio');
 const axios = require('axios');
+const crypto = require('crypto');
+
+function escHtml(v) {
+  return String(v == null ? '' : v).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+}
 const logger = require('../logger');
 const browserManager = require('../browser-manager');
 
 class WebScraper {
+  static stableId(seed) {
+    return crypto.createHash('md5').update(String(seed || '')).digest('hex').slice(0, 12);
+  }
+
   constructor(database, onAlert) {
     this.database = database;
     this.onAlert = onAlert;
@@ -31,7 +40,13 @@ class WebScraper {
   }
 
   async scrape() {
-    const allSources = this.database.getAllSources();
+    let allSources = [];
+    try {
+      allSources = this.database.getAllSources();
+    } catch (err) {
+      logger.error(`🌐 Failed to load web sources: ${err.message}`);
+      return;
+    }
     const targets = allSources.filter(s => {
       if (!s.is_active) return false;
       const isReddit = s.type.endsWith('reddit');
@@ -171,7 +186,7 @@ class WebScraper {
           }
 
           const idMatch = link.match(/\.(\d+)\/?$/);
-          const uniqueId = idMatch ? idMatch[1] : Math.random().toString(36).slice(2);
+          const uniqueId = idMatch ? idMatch[1] : WebScraper.stableId(link);
 
           if (titleEl.length > 0) {
             items.push({
@@ -227,7 +242,7 @@ class WebScraper {
 
               if (link && !link.startsWith('http')) link = 'https://technofino.in' + link;
               const idMatch = link.match(/\.(\d+)\/?$/);
-              const uniqueId = idMatch ? idMatch[1] : Math.random().toString(36).slice(2);
+              const uniqueId = idMatch ? idMatch[1] : WebScraper.stableId(link);
 
               items.push({
                 id: `forum_${uniqueId}`,
@@ -373,10 +388,10 @@ class WebScraper {
             groupId: target.source_id,
             chatType: 'forum',
             senderName: 'DesiDime',
-            body: `🔥 <b>Deal:</b> ${item.title}\n` +
-                  (item.price ? `💰 <b>Price/Discount:</b> ${item.price}\n` : '') +
-                  (item.description ? `📝 <b>Details:</b> ${item.description}\n` : '') +
-                  `🔗 <a href="${item.link}">View Deal</a>`,
+            body: `🔥 <b>Deal:</b> ${escHtml(item.title)}\n` +
+                  (item.price ? `💰 <b>Price/Discount:</b> ${escHtml(item.price)}\n` : '') +
+                  (item.description ? `📝 <b>Details:</b> ${escHtml(item.description)}\n` : '') +
+                  `🔗 <a href="${escHtml(item.link)}">View Deal</a>`,
             timestamp,
             hasMedia: false,
             mediaCaption: '',
@@ -451,7 +466,7 @@ class WebScraper {
         const content = item.find('content\\:encoded, encoded, description').first().text().trim();
         
         const idMatch = link.match(/\/comments\/([a-z0-9]+)\//i);
-        const id = idMatch ? idMatch[1] : Math.random().toString(36).slice(2);
+        const id = idMatch ? idMatch[1] : WebScraper.stableId(permalink || title || link);
 
         if (title) {
           posts.push({
@@ -518,7 +533,7 @@ class WebScraper {
         const title = art.attr('post-title') || art.find('h1, h2, h3, a[href*="/comments/"]').first().text().trim();
         const permalink = art.attr('permalink') || art.find('a[href*="/comments/"]').first().attr('href') || '';
         const author = art.attr('author') || 'Reddit User';
-        const id = art.attr('id') ? art.attr('id').replace('t3_', '') : Math.random().toString(36).slice(2);
+        const id = art.attr('id') ? art.attr('id').replace('t3_', '') : WebScraper.stableId(permalink || title);
         const text = art.find('[slot="text-body"], .feed-card-text, [data-click-id="text_body"]').first().text().trim();
 
         if (title) {
@@ -540,7 +555,7 @@ class WebScraper {
           const title = art.find('h3 a, h2 a, .title a').first().text().trim();
           const link = art.find('a[href*="/comments/"]').first().attr('href') || '';
           const author = art.find('[data-click-id="user"], .author').first().text().trim() || 'Reddit User';
-          const id = art.attr('id') ? art.attr('id').replace('t3_', '') : Math.random().toString(36).slice(2);
+          const id = art.attr('id') ? art.attr('id').replace('t3_', '') : WebScraper.stableId(link || title);
           const text = art.find('[data-click-id="text_body"], .md, .usertext-body').first().text().trim();
 
           if (title) {
@@ -570,7 +585,7 @@ class WebScraper {
 
   async _saveRedditPosts(posts, sub, sourceType, sourceName, instanceId) {
     for (const post of posts) {
-      const id = post.id || Math.random().toString(36).slice(2);
+      const id = post.id || WebScraper.stableId(post.permalink || post.url || post.title);
       const title = post.title || '';
       const text = post.selftext || post.text || '';
       const author = post.author || 'Reddit User';

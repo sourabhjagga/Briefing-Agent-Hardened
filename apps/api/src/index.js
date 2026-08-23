@@ -445,18 +445,20 @@ function startDashboardServer(database, whatsapp, telegramUser, scheduler, summa
         return res.status(400).json({ error: 'Cannot delete built-in CC or Deals categories' });
       }
 
-      database.deleteCategory(id);
-
-      if (cat && botInstances.has(cat.slug)) {
-        try { await botInstances.get(cat.slug).stop(); } catch (e) { /* ignore */ }
-        botInstances.delete(cat.slug);
-        scheduler.updateBotInstances(botInstances);
-      }
-
+      // Delete children first (FK: sources.category_slug REFERENCES categories)
       if (cat) {
         const catSources = database.getSourcesByCategory(cat.slug);
         catSources.forEach(s => database.deleteSource(s.id));
+        database.deleteScheduleRulesByCategory(cat.slug);
+
+        if (botInstances.has(cat.slug)) {
+          try { await botInstances.get(cat.slug).stop(); } catch (e) { /* ignore */ }
+          botInstances.delete(cat.slug);
+          scheduler.updateBotInstances(botInstances);
+        }
       }
+
+      database.deleteCategory(id);
 
       scheduler.reload();
       res.json({ success: true });
@@ -927,6 +929,10 @@ function startDashboardServer(database, whatsapp, telegramUser, scheduler, summa
   app.delete('/api/cookies/:site', (req, res) => {
     try {
       const { site } = req.params;
+      const VALID_SITES = ['youtube', 'technofino', 'desidime', 'reddit'];
+      if (!VALID_SITES.includes(site)) {
+        return res.status(400).json({ error: `Invalid site. Must be one of: ${VALID_SITES.join(', ')}` });
+      }
       database.deleteCookies(site);
       [path.resolve(__dirname, `../data/${site}_cookies.json`),
        path.resolve(__dirname, `../../data/${site}_cookies.json`)].forEach(p => {
@@ -992,7 +998,7 @@ function startDashboardServer(database, whatsapp, telegramUser, scheduler, summa
 
       // Check Telegram User
       if (telegramUser) {
-        results.telegramUser.authorized = telegramUser.isReady || false;
+        results.telegramUser.authorized = telegramUser.isListening || false;
       }
 
       // Check volume mounts
@@ -1063,6 +1069,10 @@ function startDashboardServer(database, whatsapp, telegramUser, scheduler, summa
     try {
       const { site, cookies } = req.body;
       if (!site || !cookies) return res.status(400).json({ error: 'Missing site or cookies payload' });
+      const VALID_SITES = ['youtube', 'technofino', 'desidime', 'reddit'];
+      if (!VALID_SITES.includes(site)) {
+        return res.status(400).json({ error: `Invalid site. Must be one of: ${VALID_SITES.join(', ')}` });
+      }
       const parsedCookies = parseCookiesInput(cookies);
       if (!parsedCookies || parsedCookies.length === 0) {
         return res.status(400).json({ error: 'Invalid cookies format. Paste a JSON array or a Netscape HTTP Cookie File.' });
@@ -1122,7 +1132,11 @@ function startDashboardServer(database, whatsapp, telegramUser, scheduler, summa
         return res.status(401).json({ error: 'Missing signature' });
       }
       const computed = crypto.createHmac('sha256', secretKey).update(JSON.stringify(payload)).digest('hex');
-      if (!signature.includes(computed)) {
+      // Accept "sha256=<hex>" or bare hex; timing-safe compare
+      const provided = String(signature).replace(/^sha256=/, '');
+      const a = Buffer.from(provided, 'utf8');
+      const b = Buffer.from(computed, 'utf8');
+      if (a.length !== b.length || !crypto.timingSafeEqual(a, b)) {
         return res.status(401).json({ error: 'Invalid signature' });
       }
 
@@ -1158,7 +1172,7 @@ function startDashboardServer(database, whatsapp, telegramUser, scheduler, summa
   // Serve Next.js static export HTML routes
   // e.g. /sources -> sources.html, /categories -> categories.html
   // Also serves files inside subdirectories (e.g. /sources/ -> /sources.html)
-  app.get('*', (req, res) => {
+  app.get('/*splat', (req, res) => {
     if (req.path.startsWith('/api/')) {
       return res.status(404).json({ error: 'API route not found' });
     }
@@ -1167,13 +1181,15 @@ function startDashboardServer(database, whatsapp, telegramUser, scheduler, summa
     let cleanPath = req.path.replace(/\/+$/, '') || '/';
     const htmlPath = path.join(publicDir, cleanPath.endsWith('.html') ? cleanPath : cleanPath + '.html');
     const indexPath = path.join(publicDir, 'index.html');
-    if (fs.existsSync(htmlPath)) {
+    // Containment: never serve files outside publicDir
+    const contained = (p) => path.normalize(p).startsWith(publicDir + path.sep);
+    if (contained(htmlPath) && fs.existsSync(htmlPath)) {
       res.sendFile(htmlPath);
     } else {
       // Also try: if path has a directory with the same name, serve its index.html
       // e.g. /sources/other -> /sources/other.html, or fallback to index
       const dirIndexPath = path.join(publicDir, cleanPath, 'index.html');
-      if (fs.existsSync(dirIndexPath)) {
+      if (contained(dirIndexPath) && fs.existsSync(dirIndexPath)) {
         res.sendFile(dirIndexPath);
       } else {
         res.sendFile(indexPath);
@@ -1341,8 +1357,9 @@ async function main() {
     for (const [, bot] of botInstances) {
       try { await bot.stop(); } catch (e) { /* ignore */ }
     }
+    // Drain HTTP first so in-flight requests don't hit a closed DB
+    await new Promise(resolve => healthServer.close(resolve));
     database.close();
-    healthServer.close();
     logger.info('Graceful shutdown complete. Bye! 👋');
     process.exit(0);
   };

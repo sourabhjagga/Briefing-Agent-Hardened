@@ -100,14 +100,8 @@ class WhatsAppListener {
     const now = Date.now();
     
     // Respect minimum interval between reconnects
-    if (now - this._lastReconnectTime < 5000) {
+    if (now - this._lastReconnectTime < this._minReconnectInterval) {
       this._reconnectAttempts = Math.max(0, this._reconnectAttempts - 1);
-    }
-    
-    // Cap attempts
-    if (this._reconnectAttempts >= 10) {
-      logger.warn('Max reconnect attempts (10) reached. Resetting counter.');
-      this._reconnectAttempts = 0;
     }
     
     const delay = Math.min(
@@ -412,12 +406,10 @@ class WhatsAppListener {
             logger.info('  SCAN THIS QR CODE WITH YOUR WHATSAPP');
             logger.info('========================================');
             qrcode.generate(qr, { small: true });
-            qrcode.generate(qr, { small: true });
             this.latestQr = qr;
-
-            const adminJid = process.env.WHATSAPP_ADMIN_JID;
-            if (adminJid) {
-              this.sendMessage(adminJid, `New WhatsApp QR code generated. Please scan to continue.`);
+            // Note: cannot notify admin via WhatsApp here — socket is not authenticated yet.
+            if (process.env.WHATSAPP_ADMIN_JID) {
+              logger.warn('🔑 New WhatsApp QR waiting. Open the Web Dashboard to scan it.');
             }
           }
         }
@@ -447,7 +439,7 @@ class WhatsAppListener {
           if (shouldReconnect) {
             const delay = this._getReconnectDelay();
             logger.info(`WhatsApp reconnecting in ${Math.round(delay/1000)}s (attempt ${this._reconnectAttempts}/${this._maxReconnectAttempts})...`);
-            setTimeout(() => this.start(), delay);
+            setTimeout(() => { if (!this._startInProgress && !this.isReady) this.start(); }, delay);
           } else {
             logger.error('WhatsApp session logged out. Automatically clearing session and generating fresh QR code...');
             try {
@@ -457,7 +449,7 @@ class WhatsAppListener {
               }
               setTimeout(() => {
                 logger.info('Restarting WhatsApp socket in clean state to generate fresh QR...');
-                this.start();
+                if (!this._startInProgress && !this.isReady) this.start();
               }, 5000);
             } catch (err) {
               logger.error(`Failed to automatically clear auth path: ${err.message}`);
@@ -526,10 +518,14 @@ class WhatsAppListener {
     this.chatNameMap[remoteJid] = chatName;
     this._saveChatNameMap();
 
-    const body = msg.message?.conversation || 
-                 msg.message?.extendedTextMessage?.text || 
-                 msg.message?.imageMessage?.caption || 
-                 msg.message?.videoMessage?.caption || 
+    const mm = msg.message?.ephemeralMessage?.message ||
+               msg.message?.viewOnceMessage?.message ||
+               msg.message?.documentWithCaptionMessage?.message ||
+               msg.message;
+    const body = mm?.conversation || 
+                 mm?.extendedTextMessage?.text || 
+                 mm?.imageMessage?.caption || 
+                 mm?.videoMessage?.caption || 
                  '';
 
     if (!body) return;
@@ -686,6 +682,7 @@ class WhatsAppListener {
   }
 
   async stop() {
+    this._stopHealthCheck();
     if (this.sock) {
       await this.sock.end();
       this.isReady = false;
