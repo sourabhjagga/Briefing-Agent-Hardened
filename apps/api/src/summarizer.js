@@ -41,8 +41,12 @@ const FALLBACK_MODELS = [
 // Efficiency-ordered preferences (fast/cheap capable models first). Anything
 // discovered live that is not listed here is appended after the preferred set.
 const GEMINI_PREFERRED = [
-  'gemini-2.5-flash', 'gemini-3.5-flash', 'gemini-3.1-flash-lite',
-  'gemini-2.5-flash-lite', 'gemini-2.5-pro', 'gemini-3.1-pro-preview',
+  // Ordered by user's key quotas: flash-lite tier has 15 RPM / 500 RPD (best throughput),
+  // frontier flash 5 RPM / 20 RPD, Gemma 30 RPM / 14.4K RPD as high-capacity fallback.
+  // Pro models excluded — 0 quota on this key.
+  'gemini-3.5-flash-lite', 'gemini-3.1-flash-lite', 'gemini-2.5-flash-lite',
+  'gemini-3.7-flash', 'gemini-3.6-flash', 'gemini-3.5-flash', 'gemini-3-flash',
+  'gemini-2.5-flash', 'gemma-4-31b-it', 'gemma-4-26b-it',
 ];
 const OPENROUTER_PREFERRED = [
   'z-ai/glm-5.2:free',
