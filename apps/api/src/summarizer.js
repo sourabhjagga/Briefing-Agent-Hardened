@@ -38,15 +38,127 @@ const FALLBACK_MODELS = [
   { provider: 'openrouter', id: 'cohere/north-mini-code:free', name: 'OR: Cohere North Mini' }
 ];
 
+// Efficiency-ordered preferences (fast/cheap capable models first). Anything
+// discovered live that is not listed here is appended after the preferred set.
+const GEMINI_PREFERRED = [
+  'gemini-2.5-flash', 'gemini-3.5-flash', 'gemini-3.1-flash-lite',
+  'gemini-2.5-flash-lite', 'gemini-2.5-pro', 'gemini-3.1-pro-preview',
+];
+const OPENROUTER_PREFERRED = [
+  'z-ai/glm-5.2:free',
+  'nvidia/nemotron-3-ultra-550b-a55b:free',
+  'thinkingmachines/inkling:free',
+  'nvidia/nemotron-3-super-120b-a12b:free',
+  'google/gemma-4-31b-it:free',
+  'google/gemma-4-26b-a4b-it:free',
+  'dots-studio/dots-3-note-preview:free',
+  'nvidia/nemotron-nano-9b-v2:free',
+];
+
 class Summarizer {
   constructor(geminiKey, openrouterKey) {
     this.geminiKey = geminiKey;
     this.openrouterKey = openrouterKey;
-    
+
     this.genAI = geminiKey ? new GoogleGenerativeAI(geminiKey) : null;
-    
+    this._dynamicModels = null;      // discovered chain, null until first refresh
+    this._orRemaining = null;        // OpenRouter quota info (informational)
+    this._providerCooldown = {};     // provider -> ms timestamp to skip after 429
+
     if (this.genAI) logger.info('🤖 Primary AI: Google Gemini Studio ready.');
     if (this.openrouterKey) logger.info('🤖 Secondary AI: OpenRouter Free Fallbacks ready.');
+
+    this.refreshModels().catch((e) => logger.warn(`Model discovery failed (using defaults): ${e.message}`));
+    this._modelRefreshTimer = setInterval(() => {
+      this.refreshModels().catch((e) => logger.warn(`Model discovery refresh failed: ${e.message}`));
+    }, 6 * 60 * 60 * 1000);
+    if (this._modelRefreshTimer.unref) this._modelRefreshTimer.unref();
+  }
+
+  stop() {
+    if (this._modelRefreshTimer) clearInterval(this._modelRefreshTimer);
+  }
+
+  // Discover live model availability + remaining limits; rebuild the fallback
+  // chain as: most efficient (fast/cheap) capable models first, heavier ones later.
+  async refreshModels() {
+    const [geminiIds, orIds] = await Promise.all([
+      this._discoverGeminiModels(),
+      this._discoverOpenRouterModels(),
+    ]);
+
+    if (!geminiIds && !orIds) return; // both failed — keep whatever we have/defaults
+
+    const chain = [];
+    for (const id of GEMINI_PREFERRED) {
+      if (!geminiIds || geminiIds.has(id)) chain.push({ provider: 'gemini', id, name: `Gemini: ${id}` });
+    }
+    if (geminiIds) {
+      for (const id of [...geminiIds].sort()) {
+        if (!GEMINI_PREFERRED.includes(id)) chain.push({ provider: 'gemini', id, name: `Gemini: ${id} (new)` });
+      }
+    }
+    for (const id of OPENROUTER_PREFERRED) {
+      if (!orIds || orIds.has(id)) chain.push({ provider: 'openrouter', id, name: `OR: ${id.replace(':free', '')}` });
+    }
+    if (orIds) {
+      for (const id of [...orIds].sort()) {
+        if (!OPENROUTER_PREFERRED.includes(id)) chain.push({ provider: 'openrouter', id, name: `OR: ${id.replace(':free', '')} (new)` });
+      }
+    }
+
+    this._dynamicModels = chain;
+    logger.info(`🔄 Model chain refreshed: ${chain.length} models ` +
+      `(gemini=${geminiIds ? geminiIds.size : 'n/a'}, openrouter-free=${orIds ? orIds.size : 'n/a'}` +
+      `${this._orRemaining ? `, OR quota remaining=${JSON.stringify(this._orRemaining)}` : ''})`);
+  }
+
+  async _discoverGeminiModels() {
+    if (!this.geminiKey) return null;
+    try {
+      const res = await axios.get(
+        `https://generativelanguage.googleapis.com/v1beta/models?key=${this.geminiKey}&pageSize=1000`,
+        { timeout: 15000 }
+      );
+      const ids = new Set();
+      for (const m of res.data?.models || []) {
+        if (!(m.supportedGenerationMethods || []).includes('generateContent')) continue;
+        ids.add(m.name.replace(/^models\//, ''));
+      }
+      return ids.size > 0 ? ids : null;
+    } catch (err) {
+      logger.warn(`Gemini model discovery failed: ${err.message}`);
+      return null;
+    }
+  }
+
+  async _discoverOpenRouterModels() {
+    try {
+      const res = await axios.get('https://openrouter.ai/api/v1/models', { timeout: 15000 });
+      const freeIds = new Set((res.data?.data || []).map((m) => m.id).filter((id) => id.endsWith(':free')));
+      // Remaining-limit check for the user's key (free tier exposes usage/limits here)
+      if (this.openrouterKey) {
+        try {
+          const keyRes = await axios.get('https://openrouter.ai/api/v1/key', {
+            headers: { Authorization: `Bearer ${this.openrouterKey}` },
+            timeout: 15000,
+          });
+          const d = keyRes.data?.data || {};
+          this._orRemaining = d.limit_remaining !== undefined
+            ? { limit_remaining: d.limit_remaining, limit: d.limit, usage: d.usage }
+            : null;
+        } catch { /* quota endpoint best-effort */ }
+      }
+      return freeIds.size > 0 ? freeIds : null;
+    } catch (err) {
+      logger.warn(`OpenRouter model discovery failed: ${err.message}`);
+      return null;
+    }
+  }
+
+  _providerAvailable(provider) {
+    const until = this._providerCooldown[provider];
+    return !until || Date.now() >= until;
   }
 
   async generateSummary(messages, customPrompt = undefined) {
@@ -129,7 +241,9 @@ OUTPUT RULES:
   }
 
   async _callAIWithFallback(prompt, groupedMessages, isBatchSubtask = false) {
-    for (const model of FALLBACK_MODELS) {
+    const models = this._dynamicModels || FALLBACK_MODELS;
+    for (const model of models) {
+      if (!this._providerAvailable(model.provider)) continue;
       logger.info(`Attempting generation with model: ${model.name}...`);
       try {
         let summary = null;
@@ -158,6 +272,11 @@ OUTPUT RULES:
         }
       } catch (error) {
         logger.warn(`❌ Model ${model.name} failed: ${error.message}`);
+        const status = error?.response?.status || error?.status;
+        if (status === 429) {
+          this._providerCooldown[model.provider] = Date.now() + 10 * 60 * 1000;
+          logger.warn(`⏳ ${model.provider} rate-limited — skipping that provider for 10 minutes.`);
+        }
       }
     }
 
