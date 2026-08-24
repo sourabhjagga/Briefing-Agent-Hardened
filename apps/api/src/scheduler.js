@@ -95,6 +95,11 @@ class Scheduler {
 
   async _runSingleCategoryBriefLocked(slug, isManualTrigger = false) {
     const cat = this.database.getCategoryBySlug(slug);
+    const botInstance = this.botInstances.get(slug);
+    if (!botInstance) {
+      logger.warn(`⚠️ No bot instance for category "${slug}". Skipping.`);
+      return;
+    }
     await this._runSummaryJob(slug, botInstance, cat ? cat.ai_prompt : undefined, isManualTrigger);
   }
 
